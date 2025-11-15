@@ -1,0 +1,21 @@
+menu "Matter Light Switch Configuration"
+
+    config DEVICE_VENDOR_ID
+        hex "Device Vendor ID"
+        default 0xFFF1
+        help
+            Device Vendor ID for Matter
+
+    config DEVICE_PRODUCT_ID  
+        hex "Device Product ID"
+        default 0x8001
+        help
+            Device Product ID for Matter
+
+    config DEVICE_TYPE_ON_OFF_LIGHT
+        bool
+        default y
+        help
+            Device Type On/Off Light
+
+endmenu

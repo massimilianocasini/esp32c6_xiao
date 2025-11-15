@@ -1,0 +1,15 @@
+idf_component_register(
+    SRCS 
+        "app_main.cpp"
+        "app_reset.cpp"
+    INCLUDE_DIRS 
+        "."
+    PRIV_REQUIRES 
+        esp_matter
+        esp_matter_console  
+        driver
+        freertos
+        nvs_flash
+        app_update
+        esp_timer
+)
