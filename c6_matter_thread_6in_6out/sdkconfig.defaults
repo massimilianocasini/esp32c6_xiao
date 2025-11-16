@@ -23,11 +23,6 @@ CONFIG_ENABLE_ESP32_FACTORY_DATA_PROVIDER=n
 CONFIG_ENABLE_ESP32_DEVICE_INFO_PROVIDER=n
 CONFIG_ENABLE_CHIP_SHELL=y
 
-# CHIP/Matter Logging Configuration
-# Disable verbose CHIP logs (EM = Exchange Manager, DL = Data Link, etc.)
-# LOG_DEFAULT_LEVEL controls ESP-IDF logs
-# For CHIP-specific logs, you can filter at runtime or reduce detail level
-
 # Device Information
 CONFIG_DEVICE_TYPE_ON_OFF_LIGHT=y
 CONFIG_DEVICE_VENDOR_ID=0xFFF1

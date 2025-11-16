@@ -1,12 +1,13 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "app_main.cpp"
         "app_reset.cpp"
-    INCLUDE_DIRS 
+    INCLUDE_DIRS
         "."
-    PRIV_REQUIRES 
+        "include"
+    PRIV_REQUIRES
         esp_matter
-        esp_matter_console  
+        esp_matter_console
         driver
         freertos
         nvs_flash

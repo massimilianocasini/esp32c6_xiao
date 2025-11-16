@@ -28,7 +28,7 @@
 
 #include <setup_payload/OnboardingCodesUtil.h>
 #include <platform/CHIPDeviceLayer.h>
-#include <lib/support/logging/CHIPLogging.h>
+#include <platform/ESP32/ESP32Config.h>
 
 static const char *TAG = "app_main";
 
@@ -132,6 +132,7 @@ static void gpio_input_task(void *arg)
 {
     bool last_states[4] = {true, true, true, true};  // Assume pull-up, initial HIGH
     bool current_state;
+    bool inverted_state;
 
     while (1) {
         // Monitor all 4 inputs
@@ -140,22 +141,25 @@ static void gpio_input_task(void *arg)
 
             // Detect state change
             if (current_state != last_states[i]) {
+                // Invert logic: HIGH (pull-up open) = false (closed), LOW (contact) = true (open)
+                inverted_state = !current_state;
+
                 ESP_LOGI(TAG, "Input %d (GPIO%d) changed to %s", i + 1, input_pins[i],
-                         current_state ? "HIGH (Open)" : "LOW (Closed)");
+                         inverted_state ? "OPEN" : "CLOSED");
 
                 // Update Matter Boolean State attribute
                 node_t *node = node::get();
                 endpoint_t *endpoint = endpoint::get(node, input_endpoint_ids[i]);
 
                 // Use BooleanState cluster to report contact sensor state
-                // StateValue: false = contact (closed), true = no contact (open)
+                // StateValue inverted: HIGH (open physically) = false (closed in Matter)
                 cluster_t *cluster = cluster::get(endpoint, BooleanState::Id);
                 if (cluster) {
                     attribute_t *attribute = attribute::get(cluster, BooleanState::Attributes::StateValue::Id);
                     if (attribute) {
                         esp_matter_attr_val_t val;
                         val.type = ESP_MATTER_VAL_TYPE_BOOLEAN;
-                        val.val.b = current_state;  // HIGH = open, LOW = closed
+                        val.val.b = inverted_state;  // Inverted: LOW = true (open), HIGH = false (closed)
                         attribute::update(input_endpoint_ids[i], BooleanState::Id,
                                          BooleanState::Attributes::StateValue::Id, &val);
                     }
@@ -181,9 +185,16 @@ extern "C" void app_main()
     }
     ESP_ERROR_CHECK(err);
 
-    // Disable verbose CHIP logs
-    // You can disable specific modules: ExchangeManager, DataManagement, etc.
-    chip::Logging::SetLogFilter(chip::Logging::kLogCategory_Error);
+    // Set custom Vendor Name and Product Name in NVS BEFORE Matter starts
+    const char *vendor_name = "VicinoDiCasaDigitale";
+    const char *product_name = "Matter Thread 6in/6out";
+
+    chip::DeviceLayer::Internal::ESP32Config::WriteConfigValueStr(
+        chip::DeviceLayer::Internal::ESP32Config::kConfigKey_VendorName, vendor_name);
+    chip::DeviceLayer::Internal::ESP32Config::WriteConfigValueStr(
+        chip::DeviceLayer::Internal::ESP32Config::kConfigKey_ProductName, product_name);
+
+    ESP_LOGI(TAG, "Device info configured in NVS: Vendor=%s, Product=%s", vendor_name, product_name);
 
     // Configure GPIOs
     gpio_config_t io_conf = {};
@@ -230,7 +241,8 @@ extern "C" void app_main()
     // Create 4 Input Endpoints (Contact Sensors)
     for (int i = 0; i < 4; i++) {
         contact_sensor::config_t sensor_config;
-        sensor_config.boolean_state.state_value = true;  // Initial state: open (HIGH with pull-up)
+        // With pull-up: HIGH=open, we report as false (contact/closed)
+        sensor_config.boolean_state.state_value = false;  // Initial state: closed (HIGH with pull-up inverted)
 
         endpoint_t *input_endpoint = contact_sensor::create(node, &sensor_config, ENDPOINT_FLAG_NONE, NULL);
         if (!input_endpoint) {
@@ -283,19 +295,6 @@ extern "C" void app_main()
     }
 
     ESP_LOGI(TAG, "Matter started successfully");
-
-    // Update Vendor Name and Product Name AFTER Matter starts
-    // These attributes are created by the framework, we just update them
-    const char *vendor_name = "VicinoDiCasaDigitale";
-    const char *product_name = "Matter Thread 6in/6out";
-
-    esp_matter_attr_val_t vendor_val = esp_matter_char_str((char *)vendor_name, strlen(vendor_name));
-    esp_matter_attr_val_t product_val = esp_matter_char_str((char *)product_name, strlen(product_name));
-
-    attribute::update(0, BasicInformation::Id, BasicInformation::Attributes::VendorName::Id, &vendor_val);
-    attribute::update(0, BasicInformation::Id, BasicInformation::Attributes::ProductName::Id, &product_val);
-
-    ESP_LOGI(TAG, "Device info updated - Vendor: %s, Product: %s", vendor_name, product_name);
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
     // Print Thread network status
