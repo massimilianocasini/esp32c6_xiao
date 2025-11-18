@@ -1,10 +1,20 @@
 /*
- * ESP32C6 Matter over Thread - 4 Inputs + 4 Outputs
+ * ESP32C6 Matter over Thread - 4 Inputs + 4 Outputs + Antenna Control
  * Based on ESP-Matter examples
  *
  * GPIO Configuration:
  * - Inputs: GPIO 0, 1, 2, 21 (Contact Sensors - Independent)
  * - Outputs: GPIO 22, 23, 19, 20 (On/Off Lights - Independent)
+ * - Status LED: GPIO 15 (Thread Role Indicator)
+ *   * Solid ON: End Device (no routing)
+ *   * Single blink (1x): Router (routing enabled)
+ *   * Double blink (2x): Leader (routing + network leader)
+ *   * OFF: Disconnected/Disabled
+ *
+ * XIAO ESP32C6 Antenna Control:
+ * - GPIO 3: RF switch enable (LOW to activate)
+ * - GPIO 14: Antenna selection (LOW=internal, HIGH=external)
+ * - Matter Control: Virtual On/Off endpoint (ON=External, OFF=Internal)
  */
 
 #include <esp_err.h>
@@ -24,6 +34,9 @@
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
 #include <common/Esp32ThreadInit.h>
+#include <openthread/instance.h>
+#include <openthread/thread.h>
+#include <esp_openthread.h>
 #endif
 
 #include <setup_payload/OnboardingCodesUtil.h>
@@ -45,6 +58,18 @@ static const char *TAG = "app_main";
 #define GPIO_OUTPUT_2 GPIO_NUM_19  // Output 3
 #define GPIO_OUTPUT_3 GPIO_NUM_20  // Output 4
 
+// XIAO ESP32C6 Status LED
+#define GPIO_STATUS_LED       GPIO_NUM_15  // USER LED - Thread role indicator
+
+// XIAO ESP32C6 Antenna Configuration
+// Set to 1 for external antenna (UFL connector), 0 for internal ceramic antenna
+#define USE_EXTERNAL_ANTENNA  0
+
+// Antenna control GPIOs (XIAO ESP32C6 specific)
+#define GPIO_WIFI_ENABLE      GPIO_NUM_3   // RF switch enable (must be LOW)
+#define GPIO_WIFI_ANT_CONFIG  GPIO_NUM_14  // Antenna selection: LOW=internal, HIGH=external
+// Note: Try GPIO14 (official docs), GPIO15, or GPIO16 if GPIO18 doesn't work
+
 using namespace esp_matter;
 using namespace esp_matter::attribute;
 using namespace esp_matter::endpoint;
@@ -56,9 +81,58 @@ static uint16_t output_endpoint_ids[4] = {0, 0, 0, 0};
 // Endpoint IDs for 4 inputs
 static uint16_t input_endpoint_ids[4] = {0, 0, 0, 0};
 
+// Endpoint ID for antenna control (virtual switch)
+static uint16_t antenna_endpoint_id = 0;
+
 // GPIO pins arrays
 static const gpio_num_t input_pins[4] = {GPIO_INPUT_0, GPIO_INPUT_1, GPIO_INPUT_2, GPIO_INPUT_3};
 static const gpio_num_t output_pins[4] = {GPIO_OUTPUT_0, GPIO_OUTPUT_1, GPIO_OUTPUT_2, GPIO_OUTPUT_3};
+
+// Configure antenna selection for XIAO ESP32C6
+static void configure_antenna(void)
+{
+    // Configure GPIO3 (WIFI_ENABLE) - must be LOW to enable RF switch control
+    gpio_config_t ant_enable_conf = {};
+    ant_enable_conf.intr_type = GPIO_INTR_DISABLE;
+    ant_enable_conf.mode = GPIO_MODE_OUTPUT;
+    ant_enable_conf.pin_bit_mask = (1ULL << GPIO_WIFI_ENABLE);
+    ant_enable_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    ant_enable_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&ant_enable_conf);
+    gpio_set_level(GPIO_WIFI_ENABLE, 0);  // Set LOW to activate RF switch
+
+    // Small delay for RF switch activation
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Configure WIFI_ANT_CONFIG GPIO - antenna selection
+    gpio_config_t ant_config_conf = {};
+    ant_config_conf.intr_type = GPIO_INTR_DISABLE;
+    ant_config_conf.mode = GPIO_MODE_OUTPUT;
+    ant_config_conf.pin_bit_mask = (1ULL << GPIO_WIFI_ANT_CONFIG);
+    ant_config_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    ant_config_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&ant_config_conf);
+
+#if USE_EXTERNAL_ANTENNA
+    gpio_set_level(GPIO_WIFI_ANT_CONFIG, 1);  // HIGH = External antenna (UFL)
+    ESP_LOGI(TAG, "Antenna configured: EXTERNAL (UFL connector)");
+#else
+    gpio_set_level(GPIO_WIFI_ANT_CONFIG, 0);  // LOW = Internal ceramic antenna
+    ESP_LOGI(TAG, "Antenna configured: INTERNAL (ceramic)");
+#endif
+}
+
+// Switch antenna at runtime (call this function to change antenna)
+void switch_antenna(bool use_external)
+{
+    if (use_external) {
+        gpio_set_level(GPIO_WIFI_ANT_CONFIG, 1);  // HIGH = External antenna
+        ESP_LOGI(TAG, "Switched to EXTERNAL antenna (UFL)");
+    } else {
+        gpio_set_level(GPIO_WIFI_ANT_CONFIG, 0);  // LOW = Internal antenna
+        ESP_LOGI(TAG, "Switched to INTERNAL antenna (ceramic)");
+    }
+}
 
 // Event callback
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
@@ -111,6 +185,11 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type,
                              val->val.b ? "ON" : "OFF");
                     break;
                 }
+            }
+
+            // Check if it's the antenna control endpoint
+            if (endpoint_id == antenna_endpoint_id) {
+                switch_antenna(val->val.b);  // true = external, false = internal
             }
         }
     }
@@ -173,6 +252,89 @@ static void gpio_input_task(void *arg)
     }
 }
 
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+// Thread role monitoring task - Controls status LED
+// LED patterns indicate Thread device role in mesh network
+static void thread_status_led_task(void *arg)
+{
+    otDeviceRole last_role = OT_DEVICE_ROLE_DISABLED;
+
+    ESP_LOGI(TAG, "Thread status LED task started on GPIO%d", GPIO_STATUS_LED);
+
+    while (1) {
+        // Get OpenThread instance
+        otInstance *instance = esp_openthread_get_instance();
+        if (instance) {
+            otDeviceRole role = otThreadGetDeviceRole(instance);
+
+            // Log role changes
+            if (role != last_role) {
+                const char *role_str = "UNKNOWN";
+                switch (role) {
+                    case OT_DEVICE_ROLE_DISABLED:  role_str = "DISABLED"; break;
+                    case OT_DEVICE_ROLE_DETACHED:  role_str = "DETACHED"; break;
+                    case OT_DEVICE_ROLE_CHILD:     role_str = "END DEVICE (Child)"; break;
+                    case OT_DEVICE_ROLE_ROUTER:    role_str = "ROUTER"; break;
+                    case OT_DEVICE_ROLE_LEADER:    role_str = "LEADER (Router)"; break;
+                }
+                ESP_LOGI(TAG, "Thread role changed: %s", role_str);
+                last_role = role;
+            }
+
+            // Determine LED pattern based on role
+            switch (role) {
+                case OT_DEVICE_ROLE_DISABLED:
+                case OT_DEVICE_ROLE_DETACHED:
+                    // Not connected - LED OFF
+                    gpio_set_level(GPIO_STATUS_LED, 0);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    break;
+
+                case OT_DEVICE_ROLE_CHILD:
+                    // End Device (no routing) - LED ON (solid)
+                    gpio_set_level(GPIO_STATUS_LED, 1);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    break;
+
+                case OT_DEVICE_ROLE_ROUTER:
+                    // Router - Single blink (250ms ON, 750ms OFF = 1 second cycle)
+                    gpio_set_level(GPIO_STATUS_LED, 1);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    gpio_set_level(GPIO_STATUS_LED, 0);
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    break;
+
+                case OT_DEVICE_ROLE_LEADER:
+                    // Leader - Double blink (200ms ON, 200ms OFF, 200ms ON, 600ms OFF = 1200ms cycle)
+                    // First blink
+                    gpio_set_level(GPIO_STATUS_LED, 0);
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    gpio_set_level(GPIO_STATUS_LED, 1);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    // Second blink
+                    gpio_set_level(GPIO_STATUS_LED, 0);
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    gpio_set_level(GPIO_STATUS_LED, 1);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    break;
+
+                default:
+                    // Unknown - Fast blink
+                    gpio_set_level(GPIO_STATUS_LED, 1);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    gpio_set_level(GPIO_STATUS_LED, 0);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    break;
+            }
+        } else {
+            // OpenThread not available - LED OFF
+            gpio_set_level(GPIO_STATUS_LED, 0);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+}
+#endif // CHIP_DEVICE_CONFIG_ENABLE_THREAD
+
 extern "C" void app_main()
 {
     esp_err_t err = ESP_OK;
@@ -195,6 +357,9 @@ extern "C" void app_main()
         chip::DeviceLayer::Internal::ESP32Config::kConfigKey_ProductName, product_name);
 
     ESP_LOGI(TAG, "Device info configured in NVS: Vendor=%s, Product=%s", vendor_name, product_name);
+
+    // Configure antenna (XIAO ESP32C6 specific - must be done BEFORE radio operations)
+    configure_antenna();
 
     // Configure GPIOs
     gpio_config_t io_conf = {};
@@ -222,11 +387,21 @@ extern "C" void app_main()
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     gpio_config(&io_conf);
 
+    // Configure Status LED (USER LED on GPIO15)
+    io_conf.intr_type = GPIO_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = (1ULL << GPIO_STATUS_LED);
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&io_conf);
+    gpio_set_level(GPIO_STATUS_LED, 0);  // Initially OFF
+
     ESP_LOGI(TAG, "GPIOs configured:");
     ESP_LOGI(TAG, "  Inputs: GPIO%d, %d, %d, %d",
              GPIO_INPUT_0, GPIO_INPUT_1, GPIO_INPUT_2, GPIO_INPUT_3);
     ESP_LOGI(TAG, "  Outputs: GPIO%d, %d, %d, %d",
              GPIO_OUTPUT_0, GPIO_OUTPUT_1, GPIO_OUTPUT_2, GPIO_OUTPUT_3);
+    ESP_LOGI(TAG, "  Status LED: GPIO%d (Thread role indicator)", GPIO_STATUS_LED);
 
     // Create Matter node
     node::config_t node_config;
@@ -271,6 +446,20 @@ extern "C" void app_main()
         ESP_LOGI(TAG, "Output %d (GPIO%d) endpoint created with id %u",
                  i + 1, output_pins[i], output_endpoint_ids[i]);
     }
+
+    // Create Antenna Control Endpoint (Virtual Switch)
+    on_off_light::config_t antenna_config;
+    antenna_config.on_off.on_off = USE_EXTERNAL_ANTENNA;  // Initial state based on define
+    antenna_config.on_off_lighting.start_up_on_off = nullptr;
+
+    endpoint_t *antenna_endpoint = on_off_light::create(node, &antenna_config, ENDPOINT_FLAG_NONE, NULL);
+    if (!antenna_endpoint) {
+        ESP_LOGE(TAG, "Failed to create antenna control endpoint");
+        return;
+    }
+
+    antenna_endpoint_id = endpoint::get_id(antenna_endpoint);
+    ESP_LOGI(TAG, "Antenna Control endpoint created with id %u (ON=External, OFF=Internal)", antenna_endpoint_id);
 
     ESP_LOGI(TAG, "All Matter endpoints created successfully");
 
@@ -327,6 +516,11 @@ extern "C" void app_main()
     // Start GPIO input monitoring task
     xTaskCreate(gpio_input_task, "gpio_input", 4096, NULL, 5, NULL);
 
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+    // Start Thread status LED monitoring task
+    xTaskCreate(thread_status_led_task, "thread_led", 4096, NULL, 5, NULL);
+#endif
+
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "====================================");
     ESP_LOGI(TAG, "ESP32C6 Matter Device Started");
@@ -334,6 +528,8 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "Configuration:");
     ESP_LOGI(TAG, "  - 4 Input Sensors: GPIO 0,1,2,21");
     ESP_LOGI(TAG, "  - 4 Output Controls: GPIO 22,23,19,20");
+    ESP_LOGI(TAG, "  - 1 Antenna Control: Virtual (ON=Ext, OFF=Int)");
+    ESP_LOGI(TAG, "  - Status LED: GPIO 15 (Thread role indicator)");
     ESP_LOGI(TAG, "  - Protocol: Matter over Thread");
     ESP_LOGI(TAG, "====================================");
     ESP_LOGI(TAG, "");
