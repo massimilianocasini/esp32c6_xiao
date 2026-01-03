@@ -1,0 +1,235 @@
+// ==============================================================================
+// SCD40 Matter Device - OpenHAB 4.x/5.x Rules with Smart Debouncing
+// ==============================================================================
+// Copia questo file in: /etc/openhab/rules/scd40.rules
+//
+// FUNZIONALITÀ DEBOUNCING:
+// - Attende 10 secondi dall'ultima modifica prima di inviare al device
+// - Attende ulteriori 10 secondi prima di salvare in EEPROM
+// - Evita di inviare ogni singolo step durante lo spostamento degli slider
+// ==============================================================================
+
+// ==============================================================================
+// REGOLE DI CONVERSIONE CON DEBOUNCING
+// ==============================================================================
+
+rule "SCD40: Altitude Command (Meters -> Pending)"
+when
+    Item SCD40Altitudine1 received command
+then
+    // Converti metri (0-5000) e salva come pending
+    var meters = (receivedCommand as Number).intValue
+
+    // Limita il range a 0-5000 metri
+    if (meters < 0) {
+        meters = 0
+        logWarn("SCD40", "Altitudine negativa ricevuta, impostata a 0m")
+    } else if (meters > 5000) {
+        meters = 5000
+        logWarn("SCD40", "Altitudine troppo alta, impostata a 5000m")
+    }
+
+    // Salva il valore pending
+    SCD40_AltitudePending.postUpdate(meters)
+
+    // Aggiorna timestamp per resettare il timer
+    SCD40_LastChangeMillis.postUpdate(now.toInstant.toEpochMilli)
+end
+
+rule "SCD40: Temperature Offset Command (Celsius -> Pending)"
+when
+    Item SCD40_TempOffset1 received command
+then
+    // Converti gradi Celsius (0-10) e salva come pending
+    var celsius = (receivedCommand as Number).floatValue
+
+    // Limita il range a 0-10°C
+    if (celsius < 0.0f) {
+        celsius = 0.0f
+        logWarn("SCD40", "Offset temperatura negativo, impostato a 0°C")
+    } else if (celsius > 10.0f) {
+        celsius = 10.0f
+        logWarn("SCD40", "Offset temperatura troppo alto, impostato a 10°C")
+    }
+
+    // Salva il valore pending
+    SCD40_TempOffsetPending.postUpdate(celsius)
+
+    // Aggiorna timestamp per resettare il timer
+    SCD40_LastChangeMillis.postUpdate(now.toInstant.toEpochMilli)
+end
+
+// ==============================================================================
+// TIMER DEBOUNCING - Invia dopo 10 secondi di inattività
+// ==============================================================================
+
+rule "SCD40: Send pending values after 10s"
+when
+    Item SCD40_LastChangeMillis changed
+then
+    // Crea timer che scatta dopo 10 secondi
+    createTimer(now.plusSeconds(10), [ |
+        val lastChangeMillis = (SCD40_LastChangeMillis.state as Number).longValue
+        val nowMillis = now.toInstant.toEpochMilli
+        val elapsedMillis = nowMillis - lastChangeMillis
+
+        if (elapsedMillis >= 10000) {
+            // Sono passati 10 secondi senza nuove modifiche - invia i valori pending
+            var valuesSent = false
+
+            // Invia altitudine se c'è un valore pending
+            if (SCD40_AltitudePending.state !== NULL && SCD40_AltitudePending.state instanceof Number) {
+                val meters = (SCD40_AltitudePending.state as Number).intValue
+                val percentage = (meters * 100.0 / 5000.0)
+
+                SCD40Altitudine1_Raw.sendCommand(percentage)
+                logInfo("SCD40", "✓ Altitudine inviata: {}m", meters)
+                valuesSent = true
+            }
+
+            // Invia offset temperatura se c'è un valore pending
+            if (SCD40_TempOffsetPending.state !== NULL && SCD40_TempOffsetPending.state instanceof Number) {
+                val celsius = (SCD40_TempOffsetPending.state as Number).floatValue
+                val percentage = (celsius * 100.0 / 10.0)
+
+                SCD40_TempOffset1_Raw.sendCommand(percentage)
+                logInfo("SCD40", "✓ Offset temperatura inviato: {}°C", celsius)
+                valuesSent = true
+            }
+
+            // Aggiorna timestamp SOLO se almeno un valore è stato inviato
+            if (valuesSent) {
+                SCD40_SendTimestamp.postUpdate(now.toInstant.toEpochMilli)
+            }
+        }
+    ])
+end
+
+// ==============================================================================
+// REGOLE DI UPDATE (Device -> UI)
+// ==============================================================================
+
+rule "SCD40: Altitude Update (Dimmer -> Meters)"
+when
+    Item SCD40Altitudine1_Raw changed
+then
+    // OpenHAB restituisce percentuale (0-100%)
+    val percentage = (SCD40Altitudine1_Raw.state as Number).intValue
+
+    // Calcola i metri da percentuale
+    val meters = (percentage * 5000 / 100).intValue
+
+    // Aggiorna l'item proxy
+    SCD40Altitudine1.postUpdate(meters)
+end
+
+rule "SCD40: Temperature Offset Update (Dimmer -> Celsius)"
+when
+    Item SCD40_TempOffset1_Raw changed
+then
+    // OpenHAB restituisce percentuale (0-100%)
+    val percentage = (SCD40_TempOffset1_Raw.state as Number).intValue
+
+    // Calcola i gradi Celsius da percentuale
+    val celsius = percentage * 10.0f / 100.0f
+
+    // Aggiorna l'item proxy
+    SCD40_TempOffset1.postUpdate(celsius)
+end
+
+// ==============================================================================
+// REGOLE DI INIZIALIZZAZIONE
+// ==============================================================================
+
+rule "SCD40: Initialize Altitude on Startup"
+when
+    System started
+then
+    createTimer(now.plusSeconds(5), [ |
+        if (SCD40Altitudine1_Raw.state !== NULL && SCD40Altitudine1_Raw.state instanceof Number) {
+            val percentage = (SCD40Altitudine1_Raw.state as Number).intValue
+            val meters = (percentage * 5000 / 100).intValue
+            SCD40Altitudine1.postUpdate(meters)
+            logInfo("SCD40", "Altitudine inizializzata: {}m", meters)
+        }
+    ])
+end
+
+rule "SCD40: Initialize TempOffset on Startup"
+when
+    System started
+then
+    createTimer(now.plusSeconds(5), [ |
+        if (SCD40_TempOffset1_Raw.state !== NULL && SCD40_TempOffset1_Raw.state instanceof Number) {
+            val percentage = (SCD40_TempOffset1_Raw.state as Number).intValue
+            val celsius = percentage * 10.0f / 100.0f
+            SCD40_TempOffset1.postUpdate(celsius)
+            logInfo("SCD40", "Offset temperatura inizializzato: {}°C", celsius)
+        }
+    ])
+end
+
+// ==============================================================================
+// AUTO-PERSIST - Salva 10 secondi dopo l'invio al device
+// ==============================================================================
+
+rule "SCD40: Auto-persist 10s after sending to device"
+when
+    Item SCD40_SendTimestamp changed
+then
+    // Crea timer che scatta dopo 10 secondi dall'invio
+    createTimer(now.plusSeconds(10), [ |
+        val sendMillis = (SCD40_SendTimestamp.state as Number).longValue
+        val nowMillis = now.toInstant.toEpochMilli
+        val elapsedMillis = nowMillis - sendMillis
+
+        if (elapsedMillis >= 10000) {
+            // Sono passati 10 secondi dall'ultimo invio - salva in EEPROM
+            logInfo("SCD40", "✓ Auto-salvataggio in EEPROM")
+            SCD40_Persist1.sendCommand(ON)
+
+            createTimer(now.plusSeconds(1), [ |
+                SCD40_Persist1.sendCommand(OFF)
+            ])
+        }
+    ])
+end
+
+// ==============================================================================
+// UTILITY - Auto-persist per switch (ASC, Low Power)
+// ==============================================================================
+
+rule "SCD40: Auto-persist switch settings"
+when
+    Item SCD40_ASC1 changed or
+    Item SCD40_LowPower1 changed
+then
+    // Per gli switch, salva dopo 2 secondi
+    createTimer(now.plusSeconds(2), [ |
+        logInfo("SCD40", "✓ Auto-salvataggio switch in EEPROM")
+        SCD40_Persist1.sendCommand(ON)
+
+        createTimer(now.plusSeconds(1), [ |
+            SCD40_Persist1.sendCommand(OFF)
+        ])
+    ])
+end
+
+// ==============================================================================
+// UTILITY - Log CO2 warnings
+// ==============================================================================
+
+rule "SCD40: Log CO2 warnings"
+when
+    Item SCD40_CO2_1 changed
+then
+    if (SCD40_CO2_1.state !== NULL && SCD40_CO2_1.state instanceof Number) {
+        val co2 = (SCD40_CO2_1.state as Number).intValue
+
+        if (co2 > 1000) {
+            logWarn("SCD40", "⚠️ CO2 elevato: {} ppm - Arieggia!", co2)
+        } else if (co2 > 800) {
+            logInfo("SCD40", "CO2 moderato: {} ppm", co2)
+        }
+    }
+end

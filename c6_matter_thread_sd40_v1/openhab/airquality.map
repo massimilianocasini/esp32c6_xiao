@@ -1,0 +1,29 @@
+# ==============================================================================
+# Air Quality Mapping for SCD40
+# ==============================================================================
+# Copia questo file in: /etc/openhab/transform/airquality.map
+# ==============================================================================
+
+# Matter Air Quality Enum Values:
+# 0 = Unknown
+# 1 = Good
+# 2 = Fair
+# 3 = Moderate
+# 4 = Poor
+# 5 = Very Poor
+# 6 = Extremely Poor
+
+0=Sconosciuto
+1=Eccellente
+2=Buona
+3=Moderata
+4=Scarsa
+5=Pessima
+6=Molto Pessima
+
+NULL=N/D
+-=N/D
+UNDEF=N/D
+
+# Default fallback
+*=Sconosciuto

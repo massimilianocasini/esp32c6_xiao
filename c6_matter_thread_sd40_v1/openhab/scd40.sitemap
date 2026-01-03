@@ -1,0 +1,108 @@
+// ==============================================================================
+// SCD40 Matter Device - OpenHAB Sitemap Example
+// ==============================================================================
+// Copia questo file in: /etc/openhab/sitemaps/scd40.sitemap
+// ==============================================================================
+
+sitemap scd40 label="Sensore SCD40" {
+    Frame label="Misurazioni Ambientali" {
+        Text item=SCD40_CO2_1 icon="gas" valuecolor=[
+            >1500="red",
+            >1000="orange",
+            >800="yellow",
+            <=800="green"
+        ]
+        Text item=SCD40_Temperature1 icon="temperature"
+        Text item=SCD40_Humidity1 icon="humidity"
+        Text item=SCD40_AirQuality1 icon="qualityofservice"
+    }
+
+    Frame label="Configurazione Sensore" {
+        // Altitudine - Setpoint con step di 10 metri
+        Setpoint item=SCD40Altitudine1
+            label="Altitudine [%d m]"
+            icon="altitude"
+            minValue=0
+            maxValue=5000
+            step=10
+
+        // Offset Temperatura - Slider con step di 0.1°C
+        Slider item=SCD40_TempOffset1
+            label="Offset Temperatura [%.2f °C]"
+            icon="temperature_hot"
+            minValue=0
+            maxValue=10
+            step=0.1
+
+        // Oppure come Setpoint
+        // Setpoint item=SCD40_TempOffset1
+        //     label="Offset Temperatura [%.2f °C]"
+        //     minValue=0
+        //     maxValue=10
+        //     step=0.5
+
+        Switch item=SCD40_ASC1
+            label="Auto-Calibrazione ASC"
+            icon="switch"
+    }
+
+    Frame label="Azioni" {
+        Switch item=SCD40_Calibrate1
+            label="Calibra a 400 ppm"
+            icon="settings"
+            mappings=[ON="Calibra"]
+
+        Switch item=SCD40_SelfTest1
+            label="Esegui Autotest"
+            icon="test"
+            mappings=[ON="Test"]
+
+        Switch item=SCD40_Persist1
+            label="Salva Configurazione"
+            icon="save"
+            mappings=[ON="Salva"]
+
+        Switch item=SCD40_LowPower1
+            label="Risparmio Energetico"
+            icon="energy"
+    }
+
+    Frame label="Valori Raw (Debug)" {
+        Text item=SCD40Altitudine1_Raw
+            label="Altitudine Raw [%d]"
+            visibility=[SCD40Altitudine1_Raw!=NULL]
+
+        Text item=SCD40_TempOffset1_Raw
+            label="Offset Raw [%d]"
+            visibility=[SCD40_TempOffset1_Raw!=NULL]
+    }
+}
+
+// ==============================================================================
+// SITEMAP ALTERNATIVA - Solo Letture Sensori
+// ==============================================================================
+
+sitemap scd40_simple label="SCD40 Monitor" {
+    Frame {
+        Text item=SCD40_CO2_1 valuecolor=[
+            >1500="red",
+            >1000="orange",
+            >800="yellow",
+            <=800="green"
+        ]
+        Text item=SCD40_Temperature1
+        Text item=SCD40_Humidity1
+    }
+}
+
+// ==============================================================================
+// SITEMAP COMPLETA - Per dashboard principale
+// ==============================================================================
+
+sitemap home label="Casa" {
+    Frame label="Qualità Aria" {
+        Group item=gSCD40 label="Sensore SCD40 [%.0f ppm]" icon="gas"
+    }
+
+    // Altri frame...
+}

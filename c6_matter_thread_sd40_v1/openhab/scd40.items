@@ -1,0 +1,86 @@
+// ==============================================================================
+// SCD40 Matter Device - OpenHAB Items Configuration
+// ==============================================================================
+// Copia questo file in: /etc/openhab/items/scd40.items
+//
+// IMPORTANTE: Sostituisci i channel ID con quelli reali del tuo dispositivo Matter
+// Puoi trovarli in: Settings -> Things -> [Il tuo device] -> Channels
+// ==============================================================================
+
+Group gSCD40 "SCD40 Sensor" <temperature>
+
+// ------------------------------------------------------------------------------
+// SENSORI (Read-only)
+// ------------------------------------------------------------------------------
+
+Number:Dimensionless SCD40_CO2_1 "CO2 [%.0f ppm]" <gas> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint7_co2" }
+
+Number:Temperature SCD40_Temperature1 "Temperatura [%.1f °C]" <temperature> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint8_temperature" }
+
+Number:Dimensionless SCD40_Humidity1 "Umidità [%.1f %%]" <humidity> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint9_humidity" }
+
+Number SCD40_AirQuality1 "Qualità Aria [MAP(airquality.map):%s]" <qualityofservice> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint7_airquality" }
+
+// ------------------------------------------------------------------------------
+// CONTROLLI VIRTUALI - SWITCH (Momentary e Latching)
+// ------------------------------------------------------------------------------
+
+Switch SCD40_Calibrate1 "Calibra (400 ppm)" <settings> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint10_switch" }
+
+Switch SCD40_ASC1 "Auto-Calibrazione ASC" <switch> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint11_switch" }
+
+Switch SCD40_LowPower1 "Modalità Risparmio Energetico" <energy> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint12_switch" }
+
+Switch SCD40_Persist1 "Salva Impostazioni" <save> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint13_switch" }
+
+Switch SCD40_SelfTest1 "Autotest Sensore" <test> (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint14_switch" }
+
+// ------------------------------------------------------------------------------
+// CONTROLLI NUMERICI - Item RAW (nascosti dall'UI)
+// ------------------------------------------------------------------------------
+// Questi sono i dimmer Matter originali (0-254)
+// NON usarli direttamente - usa i proxy qui sotto
+
+Dimmer SCD40Altitudine1_Raw "Altitudine Raw [%d]" (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint15_brightness" }
+
+Dimmer SCD40_TempOffset1_Raw "Offset Temperatura Raw [%d]" (gSCD40)
+    { channel="matter:XXXXX:XXXXX:endpoint16_brightness" }
+
+// ------------------------------------------------------------------------------
+// CONTROLLI NUMERICI - Item PROXY (da usare nelle UI)
+// ------------------------------------------------------------------------------
+// Questi item hanno valori intuitivi e gestiscono la conversione automatica
+
+Number:Length SCD40Altitudine1 "Altitudine [%d m]" <altitude> (gSCD40)
+    ["Measurement"]
+
+Number:Temperature SCD40_TempOffset1 "Offset Temperatura [%.2f °C]" <temperature_hot> (gSCD40)
+    ["Setpoint", "Temperature"]
+
+// ------------------------------------------------------------------------------
+// ITEM INTERNI (per gestione debouncing e auto-persist)
+// ------------------------------------------------------------------------------
+
+Number SCD40_LastChangeMillis "Timestamp ultima modifica (ms)"
+Number SCD40_AltitudePending "Altitudine in attesa di invio (m)"
+Number SCD40_TempOffsetPending "Offset temperatura in attesa di invio (°C)"
+Number SCD40_SendTimestamp "Timestamp ultimo invio al device (ms)"
+
+// ------------------------------------------------------------------------------
+// METADATA (Opzionale - per UI più ricche)
+// ------------------------------------------------------------------------------
+
+// Metadata per Google Home / Alexa (se integrati)
+// SCD40_Temperature1 [ "Measurement", "Temperature" ]
+// SCD40_Humidity1 [ "Measurement", "Humidity" ]
+// SCD40_CO2_1 [ "Measurement", "CarbonDioxide" ]
