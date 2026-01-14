@@ -30,10 +30,10 @@ Dispositivo Matter over Thread per **ESP32-C6** (XIAO) con **4 sensori di contat
 
 2 uscite digitali indipendenti controllabili via Matter:
 
-| Output | GPIO | Funzione Matter | Stato Iniziale |
-|--------|------|-----------------|----------------|
-| Output 1 | GPIO 19 | On/Off Light 1 | OFF (LOW) |
-| Output 2 | GPIO 20 | On/Off Light 2 | OFF (LOW) |
+| Output    | GPIO     | Funzione Matter | Stato Iniziale |
+|-----------|----------|-----------------|----------------|
+| Output 1  | GPIO 19  | On/Off Light 1  | OFF (LOW)      |
+| Output 2  | GPIO 20  | On/Off Light 2  | OFF (LOW)      |
 
 **Nota**: Le uscite sono attive HIGH (1 = ON, 0 = OFF).
 
