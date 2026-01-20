@@ -1,0 +1,10 @@
+# ESP32-C6 Matter Partition Table for 4MB Flash
+# Name,   Type, SubType, Offset,  Size, Flags
+# Note: Matter requires significant NVS space for fabric storage
+# Binary size ~1.7MB, need larger partitions
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x1D0000,
+ota_0,    app,  ota_0,   0x1E0000,0x1D0000,
+nvs_keys, data, nvs_keys,0x3B0000,0x1000,
+fctry,    data, nvs,     0x3B1000,0x6000,
