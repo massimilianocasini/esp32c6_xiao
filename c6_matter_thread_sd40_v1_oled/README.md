@@ -42,7 +42,7 @@ The OLED display shows:
 Line 0: CO2: XXXX ppm
 Line 2: Thread: Connected/Disconnected
 Line 3: Nodes: X
-Line 5: Temp: XX.X C
+Line 5: Temp: XX.XX C
 Line 6: RH: XX.X %
 ```
 
