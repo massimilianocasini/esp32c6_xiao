@@ -1,6 +1,4 @@
 */build
-/c6_matter_thread_sd40_v1_oled/managed_components
-/c6_matter_thread_sd40_v1/components
-/c6_matter_thread_sd40_v1/managed_components
-/c6_matter_thread_sd40_v1/managed_components
-/c6_matter_thread_sd40
+*/managed_components
+*/components
+*/out
