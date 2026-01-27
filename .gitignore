@@ -2,3 +2,5 @@
 */managed_components
 */components
 */out
+*.log
+*/.claude
