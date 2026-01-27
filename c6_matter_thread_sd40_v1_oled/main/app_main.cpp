@@ -35,6 +35,10 @@
 #include <esp_matter_attribute_utils.h>
 
 #include <app/clusters/air-quality-server/air-quality-server.h>
+#include <app/clusters/boolean-state-server/boolean-state-cluster.h>
+#include <data_model_provider/clusters/boolean_state_integration.h>
+#include <app/EventLogging.h>
+#include <app-common/zap-generated/cluster-objects.h>
 #include <platform/CHIPDeviceLayer.h>
 
 #include <app_priv.h>
@@ -133,6 +137,17 @@ static uint16_t air_quality_endpoint_id = 0;  // Air Quality enum (calculated fr
 static uint16_t co2_endpoint_id = 0;           // CO2 concentration in PPM
 static uint16_t temperature_endpoint_id = 0;
 static uint16_t humidity_endpoint_id = 0;
+
+// Previous sensor values for change detection (reduce unnecessary reports)
+static uint16_t last_reported_co2 = 0;
+static int16_t last_reported_temp = 0;      // in centidegrees (°C * 100)
+static uint16_t last_reported_humidity = 0; // in centipercent (%RH * 100)
+static uint8_t last_reported_air_quality = 0;
+
+// Thresholds for reporting changes (avoid flooding network with small changes)
+#define CO2_REPORT_THRESHOLD 20        // Report if CO2 changes by more than 20 ppm
+#define TEMP_REPORT_THRESHOLD 10       // Report if temp changes by more than 0.1°C (10 centidegrees)
+#define HUMIDITY_REPORT_THRESHOLD 50   // Report if humidity changes by more than 0.5% (50 centipercent)
 
 // Endpoint IDs for SCD40 control (virtual switches for OpenHAB)
 static uint16_t scd40_calibrate_endpoint_id = 0;     // Trigger forced calibration
@@ -1364,7 +1379,6 @@ static void gpio_input_task(void *arg)
 {
     bool last_states[4] = {true, true, true, true};  // Assume pull-up, initial HIGH
     bool current_state;
-    bool inverted_state;
 
     while (1) {
         // Monitor all 4 inputs
@@ -1373,28 +1387,34 @@ static void gpio_input_task(void *arg)
 
             // Detect state change
             if (current_state != last_states[i]) {
-                // Logic: LOW (contact closed) = false (closed), HIGH (open) = true (open)
-                inverted_state = current_state;
+                // Matter BooleanState: StateValue=true means "contact detected" (closed)
+                // GPIO with pull-up: LOW=contact closed, HIGH=contact open
+                // Invert: LOW(false)->true(closed), HIGH(true)->false(open)
+                bool contact_detected = !current_state;
 
                 ESP_LOGI(TAG, "Input %d (GPIO%d) changed to %s", i + 1, input_pins[i],
-                         inverted_state ? "OPEN" : "CLOSED");
-
-                // Update Matter Boolean State attribute
-                node_t *node = node::get();
-                endpoint_t *endpoint = endpoint::get(node, input_endpoint_ids[i]);
+                         contact_detected ? "CLOSED" : "OPEN");
 
                 // Use BooleanState cluster to report contact sensor state
-                // StateValue inverted: HIGH (open physically) = false (closed in Matter)
-                cluster_t *cluster = cluster::get(endpoint, BooleanState::Id);
-                if (cluster) {
-                    attribute_t *attribute = attribute::get(cluster, BooleanState::Attributes::StateValue::Id);
-                    if (attribute) {
-                        esp_matter_attr_val_t val;
-                        val.type = ESP_MATTER_VAL_TYPE_BOOLEAN;
-                        val.val.b = inverted_state;  // LOW = false (closed), HIGH = true (open)
-                        attribute::update(input_endpoint_ids[i], BooleanState::Id,
-                                         BooleanState::Attributes::StateValue::Id, &val);
+                // StateValue: true=contact detected (closed), false=no contact (open)
+                if (input_endpoint_ids[i] != 0) {
+                    // Get the BooleanStateCluster instance for this endpoint
+                    chip::DeviceLayer::PlatformMgr().LockChipStack();
+                    auto* booleanStateCluster = ESPMatterBooleanStateGetCluster(input_endpoint_ids[i]);
+                    if (booleanStateCluster != nullptr) {
+                        // SetStateValue updates the attribute, notifies subscribers, and generates StateChange event
+                        auto eventNumber = booleanStateCluster->SetStateValue(contact_detected);
+                        if (eventNumber.has_value()) {
+                            ESP_LOGI(TAG, "Input %d StateChange event logged (eventNumber=%llu)", i + 1, eventNumber.value());
+                        } else {
+                            ESP_LOGD(TAG, "Input %d state unchanged or no event generated", i + 1);
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "Failed to get BooleanStateCluster for input %d endpoint %u", i + 1, input_endpoint_ids[i]);
                     }
+                    chip::DeviceLayer::PlatformMgr().UnlockChipStack();
+                } else {
+                    ESP_LOGW(TAG, "Input %d endpoint ID is 0 - not initialized", i + 1);
                 }
 
                 last_states[i] = current_state;
@@ -1444,12 +1464,21 @@ static void scd40_sensor_task(void *arg)
             // Update Matter attributes
             esp_matter_attr_val_t val;
 
-            // Update Air Quality enum (using Air Quality Instance API with proper locking)
-            if (gAirQualityInstance) {
-                uint8_t air_quality_val = calculate_air_quality_from_co2(co2);
+            // Calculate current values in Matter format
+            int16_t current_temp = (int16_t)(temperature * 100);
+            uint16_t current_humidity = (uint16_t)(humidity * 100);
+            uint8_t air_quality_val = calculate_air_quality_from_co2(co2);
+
+            // Check if values have changed significantly to reduce network traffic
+            bool co2_changed = (abs((int)co2 - (int)last_reported_co2) >= CO2_REPORT_THRESHOLD);
+            bool temp_changed = (abs(current_temp - last_reported_temp) >= TEMP_REPORT_THRESHOLD);
+            bool humidity_changed = (abs((int)current_humidity - (int)last_reported_humidity) >= HUMIDITY_REPORT_THRESHOLD);
+            bool air_quality_changed = (air_quality_val != last_reported_air_quality);
+
+            // Update Air Quality enum only if changed
+            if (gAirQualityInstance && air_quality_changed) {
                 chip::app::Clusters::AirQuality::AirQualityEnum air_quality_enum;
 
-                // Convert uint8_t to AirQualityEnum
                 switch (air_quality_val) {
                     case 0x01: air_quality_enum = chip::app::Clusters::AirQuality::AirQualityEnum::kGood; break;
                     case 0x02: air_quality_enum = chip::app::Clusters::AirQuality::AirQualityEnum::kFair; break;
@@ -1460,54 +1489,52 @@ static void scd40_sensor_task(void *arg)
                     default: air_quality_enum = chip::app::Clusters::AirQuality::AirQualityEnum::kUnknown; break;
                 }
 
-                // Acquire Matter stack lock before updating Air Quality
                 chip::DeviceLayer::PlatformMgr().LockChipStack();
                 auto status = gAirQualityInstance->UpdateAirQuality(air_quality_enum);
                 chip::DeviceLayer::PlatformMgr().UnlockChipStack();
 
                 if (status == chip::Protocols::InteractionModel::Status::Success) {
+                    last_reported_air_quality = air_quality_val;
                     ESP_LOGI(TAG, "Air Quality updated to: %u (CO2: %u ppm)", air_quality_val, co2);
-                } else {
-                    ESP_LOGW(TAG, "Failed to update Air Quality: status %d", static_cast<int>(status));
                 }
             }
 
-            // Update CO2 concentration value (cluster 0x040D)
-            if (co2_endpoint_id != 0) {
+            // Update CO2 only if changed significantly
+            if (co2_endpoint_id != 0 && co2_changed) {
                 val.type = ESP_MATTER_VAL_TYPE_NULLABLE_FLOAT;
-                val.val.f = (float)co2;  // CO2 PPM value (400-5000 range)
+                val.val.f = (float)co2;
                 esp_err_t err_co2 = attribute::update(co2_endpoint_id,
                                  CarbonDioxideConcentrationMeasurement::Id,
                                  CarbonDioxideConcentrationMeasurement::Attributes::MeasuredValue::Id,
                                  &val);
-                if (err_co2 != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to update CO2 concentration attribute: %s", esp_err_to_name(err_co2));
+                if (err_co2 == ESP_OK) {
+                    last_reported_co2 = co2;
                 }
             }
 
-            // Update Temperature attribute (in °C * 100 for Matter)
-            if (temperature_endpoint_id != 0) {
+            // Update Temperature only if changed significantly
+            if (temperature_endpoint_id != 0 && temp_changed) {
                 val.type = ESP_MATTER_VAL_TYPE_NULLABLE_INT16;
-                val.val.i16 = (int16_t)(temperature * 100);
+                val.val.i16 = current_temp;
                 esp_err_t err_temp = attribute::update(temperature_endpoint_id,
                                  TemperatureMeasurement::Id,
                                  TemperatureMeasurement::Attributes::MeasuredValue::Id,
                                  &val);
-                if (err_temp != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to update temperature attribute: %s", esp_err_to_name(err_temp));
+                if (err_temp == ESP_OK) {
+                    last_reported_temp = current_temp;
                 }
             }
 
-            // Update Humidity attribute (in %RH * 100 for Matter)
-            if (humidity_endpoint_id != 0) {
+            // Update Humidity only if changed significantly
+            if (humidity_endpoint_id != 0 && humidity_changed) {
                 val.type = ESP_MATTER_VAL_TYPE_NULLABLE_UINT16;
-                val.val.u16 = (uint16_t)(humidity * 100);
+                val.val.u16 = current_humidity;
                 esp_err_t err_hum = attribute::update(humidity_endpoint_id,
                                  RelativeHumidityMeasurement::Id,
                                  RelativeHumidityMeasurement::Attributes::MeasuredValue::Id,
                                  &val);
-                if (err_hum != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to update humidity attribute: %s", esp_err_to_name(err_hum));
+                if (err_hum == ESP_OK) {
+                    last_reported_humidity = current_humidity;
                 }
             }
 
