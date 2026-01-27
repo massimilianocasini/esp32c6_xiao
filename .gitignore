@@ -5,3 +5,4 @@
 *.tmp
 .vscode/
 */managed_components
+.claude
