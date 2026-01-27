@@ -1,0 +1,12 @@
+menu "Matter Light Switch Configuration"
+
+    # DEVICE_VENDOR_ID and DEVICE_PRODUCT_ID are already defined in esp-matter
+    # Use sdkconfig.defaults to set their values instead
+
+    config DEVICE_TYPE_ON_OFF_LIGHT
+        bool
+        default y
+        help
+            Device Type On/Off Light
+
+endmenu

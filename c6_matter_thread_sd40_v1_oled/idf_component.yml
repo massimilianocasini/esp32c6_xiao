@@ -1,0 +1,6 @@
+# ESP-IDF Component Manager manifest for Matter SCD40 OLED project
+# This file specifies top-level dependencies for the project
+
+dependencies:
+  idf:
+    version: ">=5.2.0"

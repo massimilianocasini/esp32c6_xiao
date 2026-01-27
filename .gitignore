@@ -1,0 +1,7 @@
+*/build
+*/.claude
+*.DS_Store
+*.log
+*.tmp
+.vscode/
+*/managed_components
