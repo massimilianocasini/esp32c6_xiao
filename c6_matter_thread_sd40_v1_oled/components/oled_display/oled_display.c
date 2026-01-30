@@ -567,7 +567,7 @@ esp_err_t oled_update_sensor_display(uint16_t co2_ppm, float temp_c, float humid
 
     // Line 4: Temperature aligned to left
     char temp_buf[16];
-    snprintf(temp_buf, sizeof(temp_buf), "%.1f C Temperat", temp_c);
+    snprintf(temp_buf, sizeof(temp_buf), "%.1f C Temp.", temp_c);
     oled_set_cursor(0, 4 * 8);  // X = 0 per allineamento a sinistra
     oled_draw_string(temp_buf);
 
