@@ -183,6 +183,10 @@ static bool scd40_available = false;  // Flag to track if sensor is available
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static i2c_master_dev_handle_t scd40_dev_handle = NULL;
 
+// I2C error recovery
+static int scd40_consecutive_errors = 0;
+#define SCD40_MAX_ERRORS_BEFORE_REINIT 3  // Reinit after 3 consecutive errors
+
 // Helper function to calculate Air Quality from CO2 level
 // Based on indoor air quality standards
 static uint8_t calculate_air_quality_from_co2(uint16_t co2_ppm) {
@@ -238,6 +242,9 @@ static uint8_t calculate_air_quality_from_co2(uint16_t co2_ppm) {
 #define SCD40_CMD_MEASURE_SINGLE_SHOT         0x219d
 #define SCD40_CMD_MEASURE_SINGLE_SHOT_RHT_ONLY 0x2196
 
+// Forward declarations
+static esp_err_t scd40_init(void);
+
 // Initialize I2C master (new API)
 static esp_err_t i2c_master_init(void)
 {
@@ -273,6 +280,69 @@ static esp_err_t i2c_master_init(void)
     }
 
     ESP_LOGI(TAG, "I2C initialized: SDA=GPIO%d, SCL=GPIO%d", I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO);
+    return ESP_OK;
+}
+
+// Reinitialize I2C bus and all I2C devices (for error recovery)
+static esp_err_t i2c_bus_reinit(void)
+{
+    ESP_LOGW(TAG, "Attempting I2C bus reinitialization (all devices)...");
+
+    // Step 1: Remove SCD40 device from bus (if exists)
+    if (scd40_dev_handle != NULL) {
+        esp_err_t err = i2c_master_bus_rm_device(scd40_dev_handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to remove SCD40 device: %s (continuing anyway)", esp_err_to_name(err));
+        }
+        scd40_dev_handle = NULL;
+    }
+
+    // Step 2: Deinitialize OLED (destroys its I2C device handle)
+    // Note: oled_deinit() only removes the device, not the bus (owns_bus=false)
+    if (oled_available) {
+        oled_deinit();
+    }
+
+    // Step 3: Delete I2C master bus (if exists)
+    if (i2c_bus_handle != NULL) {
+        esp_err_t err = i2c_del_master_bus(i2c_bus_handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to delete I2C bus: %s (continuing anyway)", esp_err_to_name(err));
+        }
+        i2c_bus_handle = NULL;
+    }
+
+    // Step 4: Small delay to let hardware settle
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Step 5: Reinitialize I2C master bus
+    esp_err_t err = i2c_master_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus reinitialization failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Step 6: Reinitialize SCD40 sensor
+    err = scd40_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SCD40 reinitialization failed: %s", esp_err_to_name(err));
+        // Continue to try OLED anyway
+    } else {
+        ESP_LOGI(TAG, "SCD40 reinitialized successfully");
+    }
+
+    // Step 7: Reinitialize OLED display with new bus
+    if (oled_available) {
+        err = oled_reinit(i2c_bus_handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "OLED reinitialization failed: %s", esp_err_to_name(err));
+            oled_available = false;
+        } else {
+            ESP_LOGI(TAG, "OLED reinitialized successfully");
+        }
+    }
+
+    ESP_LOGI(TAG, "I2C bus reinitialization complete!");
     return ESP_OK;
 }
 
@@ -1453,6 +1523,9 @@ static void scd40_sensor_task(void *arg)
         esp_err_t err = scd40_read_measurement(&co2, &temperature, &humidity);
 
         if (err == ESP_OK) {
+            // Reset error counter on successful read
+            scd40_consecutive_errors = 0;
+
             // Update global variables
             scd40_co2 = co2;
             scd40_temperature = temperature;
@@ -1592,7 +1665,24 @@ static void scd40_sensor_task(void *arg)
                                            oled_air_quality);
             }
         } else {
-            ESP_LOGW(TAG, "Failed to read SCD40 measurement");
+            scd40_consecutive_errors++;
+            ESP_LOGW(TAG, "Failed to read SCD40 measurement (error %d/%d)",
+                     scd40_consecutive_errors, SCD40_MAX_ERRORS_BEFORE_REINIT);
+
+            // Attempt I2C bus reinitialization after too many errors
+            if (scd40_consecutive_errors >= SCD40_MAX_ERRORS_BEFORE_REINIT) {
+                ESP_LOGW(TAG, "Too many consecutive errors - attempting I2C bus recovery...");
+
+                esp_err_t reinit_err = i2c_bus_reinit();
+                if (reinit_err == ESP_OK) {
+                    scd40_consecutive_errors = 0;
+                    // Wait for first measurement after reinit
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                } else {
+                    ESP_LOGE(TAG, "I2C recovery failed - will retry on next cycle");
+                    scd40_consecutive_errors = 0;  // Reset to avoid rapid reinit attempts
+                }
+            }
         }
 
         // SCD40 provides new data every 5 seconds

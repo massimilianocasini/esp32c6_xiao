@@ -177,6 +177,57 @@ esp_err_t oled_deinit(void)
     return ESP_OK;
 }
 
+esp_err_t oled_reinit(i2c_master_bus_handle_t new_i2c_bus)
+{
+    ESP_LOGI(TAG, "Reinitializing OLED display with new I2C bus...");
+
+    // Destroy existing SSD1306 handle if present
+    if (s_oled.ssd1306) {
+        ssd1306_destroy(s_oled.ssd1306);
+        s_oled.ssd1306 = NULL;
+    }
+
+    // Clear internal state but keep owns_bus=false since we don't own the bus
+    s_oled.buffer = NULL;
+    s_oled.initialized = false;
+
+    // Update to new bus (we never own it in reinit scenario)
+    s_oled.i2c_bus = new_i2c_bus;
+    s_oled.owns_bus = false;
+
+    // Configure SSD1306 with new bus
+    ssd1306_config_t ssd_cfg = {
+        .i2c_bus = s_oled.i2c_bus,
+        .i2c_address = CONFIG_OLED_I2C_ADDRESS,
+        .width = OLED_WIDTH,
+        .height = OLED_HEIGHT,
+        .flip_horizontal = true,
+        .flip_vertical = true,
+    };
+
+    esp_err_t ret = ssd1306_create(&ssd_cfg, &s_oled.ssd1306);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to recreate SSD1306: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Get buffer pointer
+    s_oled.buffer = ssd1306_get_buffer(s_oled.ssd1306);
+    if (!s_oled.buffer) {
+        ESP_LOGE(TAG, "Failed to get frame buffer during reinit");
+        ssd1306_destroy(s_oled.ssd1306);
+        s_oled.ssd1306 = NULL;
+        return ESP_FAIL;
+    }
+
+    s_oled.cursor_x = 0;
+    s_oled.cursor_y = 0;
+    s_oled.initialized = true;
+
+    ESP_LOGI(TAG, "OLED display reinitialized successfully");
+    return ESP_OK;
+}
+
 // ============================================================================
 // Display Control
 // ============================================================================

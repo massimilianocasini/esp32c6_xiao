@@ -95,6 +95,17 @@ esp_err_t oled_init(const oled_config_t *config);
 esp_err_t oled_deinit(void);
 
 /**
+ * @brief Reinitialize the OLED display with a new I2C bus
+ *
+ * Used for I2C bus recovery after errors. Destroys the current SSD1306
+ * device handle and creates a new one on the provided I2C bus.
+ *
+ * @param[in] new_i2c_bus New I2C bus handle to use
+ * @return ESP_OK on success, error code otherwise
+ */
+esp_err_t oled_reinit(i2c_master_bus_handle_t new_i2c_bus);
+
+/**
  * @brief Turn the display on
  * @return ESP_OK on success
  */
