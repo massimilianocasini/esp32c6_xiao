@@ -29,6 +29,7 @@ This project implements a Matter-compatible multi-function sensor and I/O board 
 - **Wokwi Simulator Support**: Can be simulated in Wokwi
 - **Factory Reset**: Button-based factory reset functionality
 - **NVS Persistence**: SCD40 configuration (altitude, temperature offset) persisted across reboots
+- **I2C Auto-Recovery**: Automatic I2C bus reinitialization when sensor communication fails (hot-plug support)
 
 ## Hardware Requirements
 
@@ -332,6 +333,14 @@ To perform a factory reset:
 - Allow 30+ seconds for sensor warm-up after power on
 - Ensure nothing blocks the sensor's air intake
 - Use the SCD40 Self-Test endpoint to diagnose issues
+- **I2C Auto-Recovery**: If the sensor is disconnected and reconnected, the firmware automatically detects I2C errors and reinitializes the entire I2C bus (including OLED) after 3 consecutive failures. Look for these log messages:
+  ```
+  W (xxx) app_main: Failed to read SCD40 measurement (error 1/3)
+  W (xxx) app_main: Failed to read SCD40 measurement (error 2/3)
+  W (xxx) app_main: Failed to read SCD40 measurement (error 3/3)
+  W (xxx) app_main: Too many consecutive errors - attempting I2C bus recovery...
+  I (xxx) app_main: I2C bus reinitialization complete!
+  ```
 
 ### Thread Connection Issues
 - Verify a Thread Border Router is operational
@@ -423,6 +432,32 @@ The firmware runs several background tasks:
 | scd40_sync | 4096 | 5 | Syncs SCD40 EEPROM config with Matter attributes (delayed 10s startup) |
 | thread_led | 4096 | 5 | Updates status LED based on Thread network role |
 | sntp_monitor | 4096 | 5 | Monitors NTP sync status, retries with local server if needed |
+
+## I2C Bus Auto-Recovery
+
+The firmware includes automatic I2C bus recovery to handle sensor disconnection/reconnection scenarios (hot-plug). This is useful during development or if a sensor connection becomes loose.
+
+### How It Works
+
+1. The SCD40 sensor task monitors I2C communication errors
+2. After **3 consecutive read failures**, the recovery process starts
+3. Recovery steps:
+   - Remove SCD40 device from I2C bus
+   - Deinitialize OLED display
+   - Delete I2C master bus
+   - Wait 100ms for hardware stabilization
+   - Reinitialize I2C master bus
+   - Reinitialize SCD40 sensor
+   - Reinitialize OLED display with new bus handle
+
+### Supported Scenarios
+
+- SCD40 sensor temporarily disconnected and reconnected
+- OLED display temporarily disconnected and reconnected
+- I2C bus locked up due to incomplete transaction
+- Power glitch on I2C devices
+
+**Note**: Both I2C devices (SCD40 and OLED) are reinitialized together since they share the same bus.
 
 ## Configuration Persistence
 
