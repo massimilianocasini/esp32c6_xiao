@@ -84,26 +84,34 @@ The SSD1306 OLED display (128x64 pixels, 8 lines of 16 characters) shows:
 ```
 +------------------+
 | DD/MM/YY  HH:MM  |  Line 0: Date and time (or "Attesa NTP..." if not synced)
-|                  |  Line 1: (empty)
-| XXXXppm  Quality |  Line 2: CO2 value + Air quality in Italian
-|                  |  Line 3: (empty)
-|     25.4 C       |  Line 4: Temperature (centered)
-|     65.2 %       |  Line 5: Humidity (centered)
+|    TEMPERATURA   |  Line 2: Label for the value currently shown large
+|                  |
+|     37.0 C       |  Lines 4-5: Big value (2x-scaled font), centered
+|                  |
 |                  |  Line 6: (empty)
 | 1234 12 T:C N:XX |  Line 7: I/O status, Thread status, Node count
 +------------------+
 ```
 
-**Line details:**
-- **Line 0**: Date/time in format `DD/MM/YY  HH:MM` (synchronized via NTP)
-- **Line 2**: CO2 in ppm + Air quality text in Italian:
+**Rotating big value (lines 1-6)**: Temperature, Humidity, and CO2 take turns
+occupying this block, each shown large (2x-scaled 16x16 px font) with a small
+label above indicating what's displayed. Rotation is time-based and runs
+independently of the 5s SCD40 read cycle, refreshed every
+`Display Update Interval` (default 1000ms, see Configuration):
+  - **Temperature**: `TEMPERATURA` label + `XX.X C`, shown for **5 seconds**
+  - **Humidity**: `UMIDITA'` label + `XX.X %`, shown for **3 seconds**
+  - **CO2**: Air quality text label (see below) + `XXXX ppm`, shown for **2 seconds**
+
+Air quality text in Italian (shown as the label during the CO2 phase):
   - `Ottima` (Good, <800 ppm)
   - `Buona` (Fair, 800-999 ppm)
   - `Moderata` (Moderate, 1000-1499 ppm)
-  - `Scarsa` (Poor, 1500-1999 ppm) - **blinks**
-  - `Pessima` (Very Poor, 2000-4999 ppm) - **blinks**
-  - `Pericolosa` (Extremely Poor, >=5000 ppm) - **blinks**
-- **Line 4-5**: Temperature and humidity centered with units
+  - `Scarsa` (Poor, 1500-1999 ppm) - **whole block blinks**
+  - `Pessima` (Very Poor, 2000-4999 ppm) - **whole block blinks**
+  - `Pericolosa` (Extremely Poor, >=5000 ppm) - **whole block blinks**
+
+**Line details:**
+- **Line 0**: Date/time in format `DD/MM/YY  HH:MM` (synchronized via NTP)
 - **Line 7**: Status line:
   - `1234`: Input states (1-4, shows number if active, `-` if inactive)
   - `12`: Output states (1-2, shows number if on, `-` if off)
@@ -218,7 +226,7 @@ Key configuration options:
 - `SCD40 I2C Address`: Default 0x62
 - `OLED I2C Address`: Default 0x3C
 - `Sensor Read Interval`: Default 5000ms (SCD40 measurement cycle)
-- `Display Update Interval`: Default 1000ms
+- `Display Update Interval`: Default 1000ms (redraw tick for `display_rotation` task; also the granularity of the Temp/Humidity/CO2 rotation timing)
 - `Reset Button GPIO`: Default GPIO9 (BOOT button)
 - `Thread Status LED GPIO`: Default GPIO15 (built-in USER LED)
 
@@ -428,7 +436,8 @@ The firmware runs several background tasks:
 | Task | Stack | Priority | Description |
 |------|-------|----------|-------------|
 | gpio_input | 4096 | 5 | Monitors 4 GPIO inputs and updates Matter contact sensor states |
-| scd40_sensor | 4096 | 5 | Reads CO2/temp/humidity from SCD40, updates Matter clusters and OLED |
+| scd40_sensor | 4096 | 5 | Reads CO2/temp/humidity from SCD40, updates Matter clusters |
+| display_rotation | 4096 | 5 | Redraws OLED at `Display Update Interval`, rotates Temp/Humidity/CO2 big value |
 | scd40_sync | 4096 | 5 | Syncs SCD40 EEPROM config with Matter attributes (delayed 10s startup) |
 | thread_led | 4096 | 5 | Updates status LED based on Thread network role |
 | sntp_monitor | 4096 | 5 | Monitors NTP sync status, retries with local server if needed |

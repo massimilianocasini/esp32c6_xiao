@@ -37,7 +37,6 @@ static struct {
     uint8_t cursor_x;                    ///< Current cursor X position
     uint8_t cursor_y;                    ///< Current cursor Y position
     bool initialized;                    ///< Initialization flag
-    int16_t air_quality_scroll_pos;     ///< Scroll position for air quality text
     bool blink_state;                    ///< Blink state for poor air quality warning
 } s_oled = {0};
 
@@ -422,6 +421,108 @@ esp_err_t oled_draw_string_at(uint8_t x, uint8_t y, const char *str)
     return oled_draw_string(str);
 }
 
+// ============================================================================
+// 2x Scaled Text Functions (16x16 pixels per character)
+// ============================================================================
+
+/**
+ * @brief Expand one 8-bit column into a 16-bit column (each pixel -> 2x2 block)
+ *
+ * Doubles every bit vertically: bit N of the input becomes bits 2N and 2N+1
+ * of the output. Used to build a 16px-tall glyph from the 8px font without
+ * a separate font table.
+ */
+static uint16_t oled_expand_byte_2x(uint8_t b)
+{
+    uint16_t out = 0;
+    for (uint8_t bit = 0; bit < 8; bit++) {
+        if (b & (1 << bit)) {
+            out |= (0x3 << (bit * 2));  // set both bits of the doubled pixel
+        }
+    }
+    return out;
+}
+
+esp_err_t oled_draw_char_2x(char c)
+{
+    if (!s_oled.initialized) return ESP_ERR_INVALID_STATE;
+
+    if (c == '\n') {
+        s_oled.cursor_x = 0;
+        s_oled.cursor_y += 16;
+        return ESP_OK;
+    }
+    if (c == '\r') {
+        s_oled.cursor_x = 0;
+        return ESP_OK;
+    }
+
+    // Check bounds (16x16 glyph)
+    if (s_oled.cursor_x + 16 > OLED_WIDTH) {
+        s_oled.cursor_x = 0;
+        s_oled.cursor_y += 16;
+    }
+    if (s_oled.cursor_y + 16 > OLED_HEIGHT) {
+        s_oled.cursor_y = 0;  // Wrap to top
+    }
+
+    const uint8_t *glyph = font_8x8_get_char(c);
+    uint8_t page = s_oled.cursor_y / 8;
+    uint8_t bit_offset = s_oled.cursor_y % 8;
+
+    for (uint8_t col = 0; col < 8; col++) {
+        uint16_t data16 = oled_expand_byte_2x(glyph[col]);
+        uint8_t data_lo = data16 & 0xFF;         // top 8 rows of the glyph
+        uint8_t data_hi = (data16 >> 8) & 0xFF;  // bottom 8 rows of the glyph
+
+        // Each source column becomes two adjacent destination columns
+        for (uint8_t rep = 0; rep < 2; rep++) {
+            uint16_t x = s_oled.cursor_x + col * 2 + rep;
+            if (x >= OLED_WIDTH) continue;
+
+            if (bit_offset == 0) {
+                // Page-aligned: data_lo goes in 'page', data_hi in 'page+1'
+                s_oled.buffer[page * OLED_WIDTH + x] |= data_lo;
+                if (page + 1 < OLED_PAGES) {
+                    s_oled.buffer[(page + 1) * OLED_WIDTH + x] |= data_hi;
+                }
+            } else {
+                // Glyph spans up to 3 pages once shifted
+                s_oled.buffer[page * OLED_WIDTH + x] |= (data_lo << bit_offset);
+                if (page + 1 < OLED_PAGES) {
+                    s_oled.buffer[(page + 1) * OLED_WIDTH + x] |=
+                        (data_lo >> (8 - bit_offset)) | (data_hi << bit_offset);
+                }
+                if (page + 2 < OLED_PAGES) {
+                    s_oled.buffer[(page + 2) * OLED_WIDTH + x] |= (data_hi >> (8 - bit_offset));
+                }
+            }
+        }
+    }
+
+    s_oled.cursor_x += 16;
+
+    return ESP_OK;
+}
+
+esp_err_t oled_draw_string_2x(const char *str)
+{
+    if (!str) return ESP_ERR_INVALID_ARG;
+
+    while (*str) {
+        esp_err_t ret = oled_draw_char_2x(*str++);
+        if (ret != ESP_OK) return ret;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t oled_draw_string_2x_at(uint8_t x, uint8_t y, const char *str)
+{
+    oled_set_cursor(x, y);
+    return oled_draw_string_2x(str);
+}
+
 esp_err_t oled_printf_at(uint8_t x, uint8_t y, const char *fmt, ...)
 {
     char buf[64];
@@ -519,7 +620,8 @@ esp_err_t oled_update_sensor_display(uint16_t co2_ppm, float temp_c, float humid
                                       uint8_t input_states, uint8_t output_states,
                                       uint8_t day, uint8_t month, uint16_t year,
                                       uint8_t hour, uint8_t minute, uint8_t second,
-                                      uint8_t air_quality_index)
+                                      uint8_t air_quality_index,
+                                      oled_rotating_value_t rotating_value)
 {
     if (!s_oled.initialized) return ESP_ERR_INVALID_STATE;
 
@@ -540,102 +642,49 @@ esp_err_t oled_update_sensor_display(uint16_t co2_ppm, float temp_c, float humid
     oled_set_cursor(0, 0);
     oled_draw_string(datetime_buf);
 
-    // Line 2: PPM value on left + air quality text on right
-    // PPM stays fixed, air quality text is fixed if fits, scrolls if too long
-    // Display: "1234ppm" (7 chars = 56px) + space + text in remaining space
-    // Blink entire line if air quality > 3 (Scarsa, Pessima, Pericolosa)
-
-    // Toggle blink state
+    // Lines 1-6: Rotating big value (2x-scaled), selected by `rotating_value`.
+    // Layout within the 1-6 block (pixel rows 8-63, 56px tall):
+    //   - Label line (small font, row 16) centered above the value
+    //   - Big value (16px tall, rows 32-47) centered horizontally
+    // Blink the whole block when showing CO2 with poor air quality (index > 3),
+    // same behaviour the old fixed PPM/air-quality line had.
     s_oled.blink_state = !s_oled.blink_state;
+    bool is_co2_poor = (rotating_value == OLED_ROTATING_CO2) && (air_quality_index > 3);
+    bool show_block = !is_co2_poor || s_oled.blink_state;
 
-    // If air quality is poor (> 3) and blink state is off, skip drawing this line
-    bool should_blink = (air_quality_index > 3);
-    bool show_ppm_line = !should_blink || s_oled.blink_state;
+    if (show_block) {
+        char label_buf[20];
+        char value_buf[16];
 
-    if (show_ppm_line) {
-        // Fixed PPM value on left side
-        char ppm_buf[12];
-        snprintf(ppm_buf, sizeof(ppm_buf), "%u ppm", co2_ppm);
-        oled_set_cursor(0, 2 * 8);
-        oled_draw_string(ppm_buf);
-
-        // Get air quality text in Italian
-        const char* aq_text = get_air_quality_text_it(air_quality_index);
-        uint8_t aq_text_len = strlen(aq_text);
-
-        // Air quality area starts after PPM (about 64 pixels = 8 chars position)
-        // Available width: 128 - 64 = 64 pixels = 8 characters
-        #define AQ_SCROLL_START_X 64
-        #define AQ_SCROLL_WIDTH 64  // pixels
-        #define AQ_SCROLL_CHARS 8   // characters that fit in scroll area
-
-        // If text fits in available space (≤ 8 chars), display fixed
-        // Otherwise, scroll the text
-        if (aq_text_len <= AQ_SCROLL_CHARS) {
-            // Text fits - display it fixed (centered in available space)
-            uint8_t text_x = AQ_SCROLL_START_X + ((AQ_SCROLL_WIDTH - aq_text_len * 8) / 2);
-            oled_set_cursor(text_x, 2 * 8);
-            oled_draw_string(aq_text);
-            // Reset scroll position when not scrolling
-            s_oled.air_quality_scroll_pos = 0;
-        } else {
-            // Text too long - scroll it
-            // Create scrolling text with padding for smooth loop
-            char scroll_text[32];
-            snprintf(scroll_text, sizeof(scroll_text), "  %s  ", aq_text);  // Add padding
-            int scroll_text_len = strlen(scroll_text);
-            int scroll_text_pixels = scroll_text_len * 8;
-
-            // Calculate current scroll position (wraps around)
-            int scroll_offset = s_oled.air_quality_scroll_pos % scroll_text_pixels;
-
-            // Draw scrolling text character by character within the scroll area
-            for (int i = 0; i < AQ_SCROLL_CHARS + 1; i++) {
-                int pixel_pos = i * 8 - (scroll_offset % 8);
-                int char_index = (scroll_offset / 8 + i) % scroll_text_len;
-
-                if (pixel_pos >= 0 && pixel_pos < AQ_SCROLL_WIDTH) {
-                    oled_set_cursor(AQ_SCROLL_START_X + pixel_pos, 2 * 8);
-                    oled_draw_char(scroll_text[char_index]);
-                }
-            }
-
-            // Advance scroll position for next frame (called every 5 seconds, move 8 pixels = 1 char)
-            s_oled.air_quality_scroll_pos += 8;
-            if (s_oled.air_quality_scroll_pos >= scroll_text_pixels) {
-                s_oled.air_quality_scroll_pos = 0;
-            }
+        switch (rotating_value) {
+            case OLED_ROTATING_TEMPERATURE:
+                snprintf(label_buf, sizeof(label_buf), "TEMPERATURA");
+                snprintf(value_buf, sizeof(value_buf), "%.1f C", temp_c);
+                break;
+            case OLED_ROTATING_HUMIDITY:
+                snprintf(label_buf, sizeof(label_buf), "UMIDITA'");
+                snprintf(value_buf, sizeof(value_buf), "%.1f %%", humidity);
+                break;
+            case OLED_ROTATING_CO2:
+            default:
+                snprintf(label_buf, sizeof(label_buf), "%s",
+                         get_air_quality_text_it(air_quality_index));
+                snprintf(value_buf, sizeof(value_buf), "%u ppm", co2_ppm);
+                break;
         }
+
+        // Label: small font (8px), centered on row 16 (line 2)
+        uint8_t label_len = strlen(label_buf);
+        uint8_t label_x = (label_len * 8 < OLED_WIDTH) ? (OLED_WIDTH - label_len * 8) / 2 : 0;
+        oled_set_cursor(label_x, 2 * 8);
+        oled_draw_string(label_buf);
+
+        // Value: 2x-scaled font (16px), centered on rows 32-47 (lines 4-5)
+        uint8_t value_len = strlen(value_buf);
+        uint8_t value_x = (value_len * 16 < OLED_WIDTH) ? (OLED_WIDTH - value_len * 16) / 2 : 0;
+        oled_set_cursor(value_x, 4 * 8);
+        oled_draw_string_2x(value_buf);
     }
-
-   /*  // Line 4: Temperature centered (e.g., "25.4 °C Temp")
-    char temp_buf[16];
-    snprintf(temp_buf, sizeof(temp_buf), "%.1f °C Temp", temp_c);
-    uint8_t temp_len = strlen(temp_buf);
-    uint8_t temp_x = (128 - temp_len * 8) / 2;
-    oled_set_cursor(temp_x, 4 * 8);
-    oled_draw_string(temp_buf); */
-
-    // Line 4: Temperature aligned to left
-    char temp_buf[16];
-    snprintf(temp_buf, sizeof(temp_buf), "%.1f C Temp.", temp_c);
-    oled_set_cursor(0, 4 * 8);  // X = 0 per allineamento a sinistra
-    oled_draw_string(temp_buf);
-
-/*     // Line 5: Humidity centered (e.g., "65.2 %")
-    char hum_buf[16];
-    snprintf(hum_buf, sizeof(hum_buf), "%.1f %% Umidita'", humidity);
-    uint8_t hum_len = strlen(hum_buf);
-    uint8_t hum_x = (128 - hum_len * 8) / 2;
-    oled_set_cursor(hum_x, 5 * 8);
-    oled_draw_string(hum_buf); */
-    
-    // Line 5: Humidity aligned to left
-    char hum_buf[16];
-    snprintf(hum_buf, sizeof(hum_buf), "%.1f %% Umidita'", humidity);
-    oled_set_cursor(0, 5 * 8);  // X = 0 per allineamento a sinistra
-    oled_draw_string(hum_buf); 
-
 
     // Line 7: I/O status + Thread status + Node count
     // Compact format to fit in 16 chars: "1234 12 T:C N:XX"

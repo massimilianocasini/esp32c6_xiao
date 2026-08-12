@@ -1611,59 +1611,10 @@ static void scd40_sensor_task(void *arg)
                 }
             }
 
-            // Update OLED display with sensor data and Thread status
-            if (oled_available) {
-                // Get Thread connection status
-                bool thread_connected = false;
-                uint8_t node_count = 0;
-#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
-                otInstance *ot_instance = esp_openthread_get_instance();
-                if (ot_instance) {
-                    otDeviceRole role = otThreadGetDeviceRole(ot_instance);
-                    thread_connected = (role >= OT_DEVICE_ROLE_CHILD);
-                    if (thread_connected) {
-                        node_count = 1;  // Start with self
-
-                        // Count neighbor nodes from neighbor table
-                        otNeighborInfoIterator iterator = OT_NEIGHBOR_INFO_ITERATOR_INIT;
-                        otNeighborInfo neighborInfo;
-                        while (otThreadGetNextNeighborInfo(ot_instance, &iterator, &neighborInfo) == OT_ERROR_NONE) {
-                            node_count++;
-                        }
-                    }
-                }
-#endif
-                // Get current I/O states
-                uint8_t input_states = 0;
-                uint8_t output_states = 0;
-                for (int i = 0; i < 4; i++) {
-                    if (gpio_get_level(input_pins[i]) == 0) {  // Active low (contact closed)
-                        input_states |= (1 << i);
-                    }
-                }
-                for (int i = 0; i < 2; i++) {
-                    // Active-low logic: GPIO LOW (0) = output ON
-                    if (gpio_get_level(output_pins[i]) == 0) {
-                        output_states |= (1 << i);
-                    }
-                }
-
-                // Get current time
-                time_t now;
-                struct tm timeinfo;
-                time(&now);
-                localtime_r(&now, &timeinfo);
-
-                // Calculate air quality for OLED display
-                uint8_t oled_air_quality = calculate_air_quality_from_co2(co2);
-
-                oled_update_sensor_display(co2, temperature, humidity,
-                                           thread_connected, node_count,
-                                           input_states, output_states,
-                                           timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
-                                           timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
-                                           oled_air_quality);
-            }
+            // Note: the OLED is no longer updated here. scd40_co2/scd40_temperature/
+            // scd40_humidity (set above) are read independently by display_rotation_task,
+            // which redraws the screen on its own faster cadence to animate the
+            // rotating big-value display (see DISPLAY_ROTATION_*_MS below).
         } else {
             scd40_consecutive_errors++;
             ESP_LOGW(TAG, "Failed to read SCD40 measurement (error %d/%d)",
@@ -1687,6 +1638,106 @@ static void scd40_sensor_task(void *arg)
 
         // SCD40 provides new data every 5 seconds
         vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+// ==============================================================================
+// Display Rotation Task
+// ==============================================================================
+// Redraws the OLED on its own cadence (CONFIG_DISPLAY_UPDATE_INTERVAL_MS),
+// independent of the 5s SCD40 read cycle, so it can animate the rotating
+// big-value display: Temperature, Humidity, CO2, each shown for a different
+// duration, reading the latest values from scd40_temperature/humidity/co2
+// (updated by scd40_sensor_task).
+#define DISPLAY_ROTATION_TEMPERATURE_MS  5000  // Temperature shown for 5s
+#define DISPLAY_ROTATION_HUMIDITY_MS     3000  // Humidity shown for 3s
+#define DISPLAY_ROTATION_CO2_MS          2000  // CO2 (ppm) shown for 2s
+
+static void display_rotation_task(void *arg)
+{
+    ESP_LOGI(TAG, "Display rotation task started (Temp %dms / Hum %dms / CO2 %dms)",
+             DISPLAY_ROTATION_TEMPERATURE_MS, DISPLAY_ROTATION_HUMIDITY_MS, DISPLAY_ROTATION_CO2_MS);
+
+    oled_rotating_value_t current_value = OLED_ROTATING_TEMPERATURE;
+    uint32_t elapsed_in_value_ms = 0;
+    const uint32_t tick_ms = CONFIG_DISPLAY_UPDATE_INTERVAL_MS;
+
+    while (1) {
+        if (oled_available) {
+            // Determine how long the current value has been shown and advance
+            // to the next one once its duration elapses (Temp -> Hum -> CO2 -> Temp).
+            uint32_t duration_ms;
+            switch (current_value) {
+                case OLED_ROTATING_TEMPERATURE: duration_ms = DISPLAY_ROTATION_TEMPERATURE_MS; break;
+                case OLED_ROTATING_HUMIDITY:    duration_ms = DISPLAY_ROTATION_HUMIDITY_MS;    break;
+                case OLED_ROTATING_CO2:
+                default:                         duration_ms = DISPLAY_ROTATION_CO2_MS;         break;
+            }
+
+            elapsed_in_value_ms += tick_ms;
+            if (elapsed_in_value_ms >= duration_ms) {
+                elapsed_in_value_ms = 0;
+                switch (current_value) {
+                    case OLED_ROTATING_TEMPERATURE: current_value = OLED_ROTATING_HUMIDITY;    break;
+                    case OLED_ROTATING_HUMIDITY:    current_value = OLED_ROTATING_CO2;         break;
+                    case OLED_ROTATING_CO2:
+                    default:                         current_value = OLED_ROTATING_TEMPERATURE; break;
+                }
+            }
+
+            // Get Thread connection status
+            bool thread_connected = false;
+            uint8_t node_count = 0;
+#if CHIP_DEVICE_CONFIG_ENABLE_THREAD
+            otInstance *ot_instance = esp_openthread_get_instance();
+            if (ot_instance) {
+                otDeviceRole role = otThreadGetDeviceRole(ot_instance);
+                thread_connected = (role >= OT_DEVICE_ROLE_CHILD);
+                if (thread_connected) {
+                    node_count = 1;  // Start with self
+
+                    // Count neighbor nodes from neighbor table
+                    otNeighborInfoIterator iterator = OT_NEIGHBOR_INFO_ITERATOR_INIT;
+                    otNeighborInfo neighborInfo;
+                    while (otThreadGetNextNeighborInfo(ot_instance, &iterator, &neighborInfo) == OT_ERROR_NONE) {
+                        node_count++;
+                    }
+                }
+            }
+#endif
+            // Get current I/O states
+            uint8_t input_states = 0;
+            uint8_t output_states = 0;
+            for (int i = 0; i < 4; i++) {
+                if (gpio_get_level(input_pins[i]) == 0) {  // Active low (contact closed)
+                    input_states |= (1 << i);
+                }
+            }
+            for (int i = 0; i < 2; i++) {
+                // Active-low logic: GPIO LOW (0) = output ON
+                if (gpio_get_level(output_pins[i]) == 0) {
+                    output_states |= (1 << i);
+                }
+            }
+
+            // Get current time
+            time_t now;
+            struct tm timeinfo;
+            time(&now);
+            localtime_r(&now, &timeinfo);
+
+            // Calculate air quality from the latest CO2 reading
+            uint8_t oled_air_quality = calculate_air_quality_from_co2(scd40_co2);
+
+            oled_update_sensor_display(scd40_co2, scd40_temperature, scd40_humidity,
+                                       thread_connected, node_count,
+                                       input_states, output_states,
+                                       timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
+                                       timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+                                       oled_air_quality, current_value);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(tick_ms));
     }
 }
 
@@ -2315,6 +2366,12 @@ extern "C" void app_main()
 
     // Start SCD40 sensor reading task
     xTaskCreate(scd40_sensor_task, "scd40_sensor", 4096, NULL, 5, NULL);
+
+    // Start display rotation task (redraws OLED independently of the 5s SCD40
+    // read cycle, to animate the rotating Temp/Humidity/CO2 big-value display)
+    if (oled_available) {
+        xTaskCreate(display_rotation_task, "display_rotation", 4096, NULL, 5, NULL);
+    }
 
     // Start SCD40 configuration sync task (delayed 10s to ensure Matter connection)
     if (scd40_available) {

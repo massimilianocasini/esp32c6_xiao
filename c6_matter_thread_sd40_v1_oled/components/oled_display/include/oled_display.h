@@ -262,6 +262,54 @@ esp_err_t oled_draw_string_at(uint8_t x, uint8_t y, const char *str);
 esp_err_t oled_printf_at(uint8_t x, uint8_t y, const char *fmt, ...);
 
 // ============================================================================
+// 2x Scaled Text Functions (16x16 pixels per character)
+// ============================================================================
+
+/**
+ * @brief Draw a single character at 2x scale (16x16 pixels) at current cursor
+ *
+ * Built from the same 8x8 font by doubling every pixel; no separate font
+ * table is used. Cursor advances by 16px automatically.
+ *
+ * @param[in] c Character to draw
+ * @return ESP_OK on success
+ */
+esp_err_t oled_draw_char_2x(char c);
+
+/**
+ * @brief Draw a string at 2x scale (16x16 pixels per character)
+ * @param[in] str Null-terminated string to draw
+ * @return ESP_OK on success
+ */
+esp_err_t oled_draw_string_2x(const char *str);
+
+/**
+ * @brief Draw a 2x-scaled string at specified position
+ * @param[in] x X coordinate in pixels
+ * @param[in] y Y coordinate in pixels
+ * @param[in] str Null-terminated string to draw
+ * @return ESP_OK on success
+ */
+esp_err_t oled_draw_string_2x_at(uint8_t x, uint8_t y, const char *str);
+
+// ============================================================================
+// Rotating Big-Value Display (lines 1-6: label + 2x-scaled value)
+// ============================================================================
+
+/**
+ * @brief Which sensor value is currently shown large in oled_update_sensor_display()
+ *
+ * The caller is responsible for timing the rotation (e.g. temperature 5s,
+ * humidity 3s, CO2 2s) and passing the corresponding enum value on each call;
+ * this module only draws whichever value is selected.
+ */
+typedef enum {
+    OLED_ROTATING_TEMPERATURE = 0,
+    OLED_ROTATING_HUMIDITY,
+    OLED_ROTATING_CO2,
+} oled_rotating_value_t;
+
+// ============================================================================
 // High-Level Display Functions for Sensor Data
 // ============================================================================
 
@@ -325,9 +373,15 @@ esp_err_t oled_show_humidity(uint8_t line, float humidity_percent);
  *
  * Display layout:
  * - Line 0: Date and time (DD/MM/YY HH:MM:SS) or "Attesa NTP..." if not synced
- * - Line 2: PPM value + scrolling air quality text in Italian
- * - Lines 4,5: Temperature, Humidity (centered, with units)
+ * - Lines 1-6: Rotating big value (2x-scaled) selected by `rotating_value`,
+ *   with a small label above it: air quality text for CO2, "TEMPERATURA"
+ *   for temperature, "UMIDITA'" for humidity. Entire block blinks when
+ *   showing CO2 with poor air quality (index > 3).
  * - Line 7: I/O status, Thread status (T:C/T:D), Node count (N:X)
+ *
+ * The caller drives the rotation timing (e.g. temperature 5s, humidity 3s,
+ * CO2 2s) by calling this function repeatedly with the appropriate
+ * `rotating_value`; this function itself does not track time.
  *
  * @param[in] co2_ppm CO2 value in ppm
  * @param[in] temp_c Temperature in Celsius
@@ -343,6 +397,7 @@ esp_err_t oled_show_humidity(uint8_t line, float humidity_percent);
  * @param[in] minute Minute (0-59)
  * @param[in] second Second (0-59)
  * @param[in] air_quality_index Air quality level (1=Good, 2=Fair, 3=Moderate, 4=Poor, 5=VeryPoor, 6=ExtremelyPoor)
+ * @param[in] rotating_value Which value (temperature/humidity/CO2) to show large right now
  * @return ESP_OK on success
  */
 esp_err_t oled_update_sensor_display(uint16_t co2_ppm, float temp_c, float humidity,
@@ -350,7 +405,8 @@ esp_err_t oled_update_sensor_display(uint16_t co2_ppm, float temp_c, float humid
                                       uint8_t input_states, uint8_t output_states,
                                       uint8_t day, uint8_t month, uint16_t year,
                                       uint8_t hour, uint8_t minute, uint8_t second,
-                                      uint8_t air_quality_index);
+                                      uint8_t air_quality_index,
+                                      oled_rotating_value_t rotating_value);
 
 /**
  * @brief Display startup splash screen
