@@ -45,6 +45,8 @@
 #include <app_reset.h>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include <platform/ESP32/OpenthreadLauncher.h>
@@ -174,10 +176,13 @@ static const gpio_num_t input_pins[4] = {GPIO_INPUT_0, GPIO_INPUT_1, GPIO_INPUT_
 static const gpio_num_t output_pins[2] = {GPIO_OUTPUT_0, GPIO_OUTPUT_1};
 
 // SCD40 sensor data
+// Written by scd40_sensor_task, read by display_rotation_task: protected by
+// scd40_data_mutex since float writes are not guaranteed atomic on this core.
 static uint16_t scd40_co2 = 0;        // CO2 in ppm
 static float scd40_temperature = 0.0;  // Temperature in °C
 static float scd40_humidity = 0.0;     // Humidity in %RH
 static bool scd40_available = false;  // Flag to track if sensor is available
+static SemaphoreHandle_t scd40_data_mutex = NULL;  // Guards the three fields above
 
 // I2C handles (new API)
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
@@ -1526,10 +1531,13 @@ static void scd40_sensor_task(void *arg)
             // Reset error counter on successful read
             scd40_consecutive_errors = 0;
 
-            // Update global variables
-            scd40_co2 = co2;
-            scd40_temperature = temperature;
-            scd40_humidity = humidity;
+            // Update global variables (locked: read concurrently by display_rotation_task)
+            if (scd40_data_mutex && xSemaphoreTake(scd40_data_mutex, portMAX_DELAY) == pdTRUE) {
+                scd40_co2 = co2;
+                scd40_temperature = temperature;
+                scd40_humidity = humidity;
+                xSemaphoreGive(scd40_data_mutex);
+            }
 
             ESP_LOGI(TAG, "SCD40: CO2=%u ppm, Temp=%.2f°C, Humidity=%.2f%%RH",
                      co2, temperature, humidity);
@@ -1726,10 +1734,25 @@ static void display_rotation_task(void *arg)
             time(&now);
             localtime_r(&now, &timeinfo);
 
-            // Calculate air quality from the latest CO2 reading
-            uint8_t oled_air_quality = calculate_air_quality_from_co2(scd40_co2);
+            // Snapshot the shared sensor readings under lock (written concurrently
+            // by scd40_sensor_task) so the values used below are self-consistent.
+            uint16_t co2_snapshot;
+            float temperature_snapshot, humidity_snapshot;
+            if (scd40_data_mutex && xSemaphoreTake(scd40_data_mutex, portMAX_DELAY) == pdTRUE) {
+                co2_snapshot = scd40_co2;
+                temperature_snapshot = scd40_temperature;
+                humidity_snapshot = scd40_humidity;
+                xSemaphoreGive(scd40_data_mutex);
+            } else {
+                co2_snapshot = scd40_co2;
+                temperature_snapshot = scd40_temperature;
+                humidity_snapshot = scd40_humidity;
+            }
 
-            oled_update_sensor_display(scd40_co2, scd40_temperature, scd40_humidity,
+            // Calculate air quality from the latest CO2 reading
+            uint8_t oled_air_quality = calculate_air_quality_from_co2(co2_snapshot);
+
+            oled_update_sensor_display(co2_snapshot, temperature_snapshot, humidity_snapshot,
                                        thread_connected, node_count,
                                        input_states, output_states,
                                        timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
@@ -2359,6 +2382,13 @@ extern "C" void app_main()
             CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE,
             CHIP_DEVICE_CONFIG_USE_TEST_SETUP_DISCRIMINATOR
         );
+    }
+
+    // Guards scd40_co2/scd40_temperature/scd40_humidity, shared between
+    // scd40_sensor_task (writer) and display_rotation_task (reader).
+    scd40_data_mutex = xSemaphoreCreateMutex();
+    if (!scd40_data_mutex) {
+        ESP_LOGE(TAG, "Failed to create scd40_data_mutex");
     }
 
     // Start GPIO input monitoring task
