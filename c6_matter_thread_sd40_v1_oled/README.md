@@ -77,6 +77,35 @@ This project implements a Matter-compatible multi-function sensor and I/O board 
 | 2000-4999 ppm | Very Poor |
 | >= 5000 ppm | Extremely Poor |
 
+## LED Integrati
+
+Il modulo XIAO ESP32-C6 monta due LED integrati sulla scheda:
+
+### LED Giallo — User LED (GPIO15)
+
+Controllabile via software. In questo progetto indica il ruolo del dispositivo nella rete Thread:
+
+| Comportamento | Ruolo Thread |
+|---------------|--------------|
+| Acceso fisso | End Device (nodo senza routing) |
+| Un lampeggio | Router (smista il traffico mesh) |
+| Due lampeggi | Leader (nodo principale della rete) |
+| Spento | Disconnesso / Thread non attivo |
+
+### LED Rosso — Charge LED (hardware)
+
+Gestito automaticamente dal chip di alimentazione, **non controllabile via GPIO**.
+
+| Comportamento | Significato |
+|---------------|-------------|
+| Lampeggia | Batteria in carica |
+| Spento | Batteria carica (o assente) |
+| Acceso 30 s poi spento | USB collegato senza batteria |
+
+> **Nota**: se vedi il LED rosso accendersi brevemente alla connessione USB senza batteria collegata, è il comportamento normale del circuito di carica.
+
+---
+
 ## Display Layout
 
 The SSD1306 OLED display (128x64 pixels, 8 lines of 16 characters) shows:
